@@ -1,0 +1,14 @@
+[Unit]
+Description=TensorRT Inference Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/trt-daemon /opt/model/model_fp32.plan
+# Make sure binary & model exist at these paths
+Restart=on-failure
+RuntimeDirectory=trt
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

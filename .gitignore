@@ -1,0 +1,18 @@
+# Build artifacts
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Serialized engines and models (ship instructions instead)
+*.plan
+*.onnx
+
+# Logs and runtime leftovers
+*.log
+*.tmp
+*.pid
+
+# TensorRT SDK drops
+TensorRT-*/

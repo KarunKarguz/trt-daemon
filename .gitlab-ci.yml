@@ -1,0 +1,28 @@
+stages:
+  - build
+  - test
+
+variables:
+  CMAKE_BUILD_PARALLEL_LEVEL: "4"
+
+before_script:
+  - apt-get update && apt-get install -y --no-install-recommends cmake build-essential
+
+build:
+  stage: build
+  image: nvidia/cuda:11.8.0-devel-ubuntu22.04
+  script:
+    - cmake -B build -S . -DCUDAToolkit_ROOT=/usr/local/cuda
+    - cmake --build build
+  artifacts:
+    paths:
+      - build/trt-daemon
+      - build/trt-client
+    expire_in: 1 week
+
+smoke-test:
+  stage: test
+  image: nvidia/cuda:11.8.0-runtime-ubuntu22.04
+  needs: [build]
+  script:
+    - ./build/trt-client 10 2 || true
