@@ -36,7 +36,7 @@ The daemon sits between TensorRT's C++ runtime and simple client programs. Every
 3. Daemon copies host memory into device memory, enqueues inference, waits for completion, then copies each output back and writes them in the same order.
 4. Connection stays open for subsequent requests until the client closes it.
 
-With the explicit metadata the protocol now supports multiple inputs/outputs safely. Engines must still resolve to concrete binding sizes before startup—dynamic shapes are not negotiated on the wire.
+With the explicit metadata the protocol now supports multiple inputs/outputs safely. Engines that declare runtime dimensions must provide a concrete shape at startup via `--shape` or the `TRT_SHAPES` environment variable so the daemon can advertise fixed bindings in the handshake.
 
 ## Extending safely
 

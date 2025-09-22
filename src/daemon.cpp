@@ -12,9 +12,13 @@
 #include <string>
 #include <cmath>
 #include <chrono>
-#include <sstream>
 #include <vector>
 #include <errno.h>
+#include <unordered_map>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <sstream>
 
 // Standalone daemon that accepts inference requests over a Unix domain socket.
 
@@ -97,19 +101,114 @@ struct Stats {
 struct Config {
   std::string engine = "model/resnet50_fp32.plan";
   std::string sock   = "/run/trt.sock";
+  std::vector<std::pair<std::string, std::vector<int>>> shapes;
 };
 
 /**
  * @brief Parse CLI flags into a Config struct.
  */
+static std::string trim(const std::string& s){
+  auto begin = std::find_if_not(s.begin(), s.end(), [](unsigned char ch){ return std::isspace(ch); });
+  auto end   = std::find_if_not(s.rbegin(), s.rend(), [](unsigned char ch){ return std::isspace(ch); }).base();
+  if (begin >= end) return std::string();
+  return std::string(begin, end);
+}
+
+static bool parse_shape_spec(const std::string& spec, std::pair<std::string, std::vector<int>>& out, std::string& err){
+  auto pos = spec.find('=');
+  if (pos == std::string::npos){
+    err = "shape spec '" + spec + "' missing '='";
+    return false;
+  }
+  std::string name = trim(spec.substr(0, pos));
+  std::string dimsStr = trim(spec.substr(pos + 1));
+  if (name.empty()){
+    err = "shape spec '" + spec + "' has empty binding name";
+    return false;
+  }
+  if (dimsStr.empty()){
+    err = "shape spec '" + spec + "' must include comma-separated dimensions";
+    return false;
+  }
+
+  std::replace(dimsStr.begin(), dimsStr.end(), 'x', ',');
+  std::replace(dimsStr.begin(), dimsStr.end(), 'X', ',');
+
+  std::vector<int> dims;
+  std::stringstream ss(dimsStr);
+  std::string tok;
+  while (std::getline(ss, tok, ',')){
+    tok = trim(tok);
+    if (tok.empty()) continue;
+    try {
+      int val = std::stoi(tok);
+      if (val <= 0){
+        err = "shape spec '" + spec + "' must use positive ints";
+        return false;
+      }
+      dims.push_back(val);
+    } catch (const std::exception&) {
+      err = "shape spec '" + spec + "' contains non-integer dim";
+      return false;
+    }
+  }
+  if (dims.empty()){
+    err = "shape spec '" + spec + "' must declare at least one dimension";
+    return false;
+  }
+  out = {name, std::move(dims)};
+  return true;
+}
+
+static void append_shape_list(const std::string& raw, std::vector<std::pair<std::string, std::vector<int>>>& dst){
+  std::string normalized = raw;
+  for (char& ch : normalized){
+    if (ch == '\n' || ch == '\r') ch = ';';
+  }
+
+  size_t start = 0;
+  while (start < normalized.size()){
+    size_t end = normalized.find(';', start);
+    std::string token = normalized.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    token = trim(token);
+    if (!token.empty()){
+      std::pair<std::string, std::vector<int>> spec;
+      std::string err;
+      if (!parse_shape_spec(token, spec, err)){
+        fprintf(stderr, "shape parse error: %s\n", err.c_str());
+        std::exit(1);
+      }
+      dst.push_back(std::move(spec));
+    }
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+}
+
+static void append_shapes_from_env(Config& cfg){
+  const char* env = std::getenv("TRT_SHAPES");
+  if (!env || !*env) return;
+  append_shape_list(env, cfg.shapes);
+}
+
 static Config parse_args(int argc, char** argv) {
   Config cfg;
+  append_shapes_from_env(cfg);
   for (int i=1; i<argc; ++i) {
     std::string a = argv[i];
     if ((a=="-e"||a=="--engine") && i+1<argc) { cfg.engine = argv[++i]; }
     else if ((a=="-s"||a=="--sock") && i+1<argc) { cfg.sock = argv[++i]; }
+    else if ((a=="-S"||a=="--shape") && i+1<argc) {
+      std::pair<std::string, std::vector<int>> spec;
+      std::string err;
+      if (!parse_shape_spec(argv[++i], spec, err)){
+        fprintf(stderr, "%s\n", err.c_str());
+        std::exit(1);
+      }
+      cfg.shapes.push_back(std::move(spec));
+    }
     else if (a=="-h" || a=="--help") {
-      fprintf(stderr, "Usage: %s [-e engine.plan] [-s /path/socket]\n", argv[0]);
+      fprintf(stderr, "Usage: %s [-e engine.plan] [-s /path/socket] [--shape name=dim,dim,...]\n", argv[0]);
       std::exit(0);
     }
   }
@@ -176,7 +275,21 @@ int main(int argc, char** argv){
     // ensure /run exists (some containers don’t have it)
     ::mkdir("/run", 0755);
 
-    TRTServer trt(cfg.engine);
+    TRTServer::ShapeOverride shapeMap;
+    for (const auto& spec : cfg.shapes) shapeMap[spec.first] = spec.second;
+
+    if (!shapeMap.empty()){
+        std::cout << "Applying runtime shapes:";
+        for (const auto& kv : shapeMap){
+            std::cout << ' ' << kv.first << '=';
+            for (size_t i=0;i<kv.second.size();++i){
+                std::cout << (i?"x":"") << kv.second[i];
+            }
+        }
+        std::cout << "\n";
+    }
+
+    TRTServer trt(cfg.engine, shapeMap);
 
     std::vector<Pinned> hInputs(trt.inputs().size());
     std::vector<Pinned> hOutputs(trt.outputs().size());

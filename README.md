@@ -67,11 +67,21 @@ cd workspace/trtdaemon
 
 1. Ensure a serialized engine exists (for example `models/mobilenetv2_fp32.plan`).
 2. Inside the container:
-   ```bash
-   cd /workspace/workspace/trtdaemon
-   ./build/trt-daemon -e models/mobilenetv2_fp32.plan -s /run/trt.sock
-   ```
+ ```bash
+  cd /workspace/workspace/trtdaemon
+  ./build/trt-daemon -e models/mobilenetv2_fp32.plan -s /run/trt.sock
+  ```
 3. By default the daemon listens on `/run/trt.sock`. It emits a text handshake (`TRTD 1` header) listing each binding with byte length, dtype, and dimensions before reading tensors. Pinned host buffers are sized to these bindings and latency stats print every 100 requests. If `/opt/models` already contains a `.plan`, the entrypoint auto-selects it; otherwise provide `ENGINE_PATH` or `ONNX_PATH`.
+
+Dynamic engines that rely on runtime dimensions can be pinned to a concrete shape by providing overrides on the command line or through the `TRT_SHAPES` environment variable. Shapes use `name=dim,dim,...` syntax and multiple entries are separated by semicolons:
+
+```bash
+./build/trt-daemon -e dynamic.plan --shape input=1,3,640,640 --shape boxes=1,100,4
+# or
+TRT_SHAPES="input=1,3,640,640;boxes=1,100,4" ./build/trt-daemon -e dynamic.plan
+```
+
+The daemon applies the overrides before it advertises the handshake, ensuring clients see the concrete sizes they need to stream.
 
 Stop it with `Ctrl+C`; the socket file is removed on shutdown.
 

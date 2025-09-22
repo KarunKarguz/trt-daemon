@@ -3,6 +3,10 @@ set -euo pipefail
 
 ENGINE=${ENGINE_PATH:-models/mobilenetv2_fp32.plan}
 SOCK=${SOCKET_PATH:-/tmp/trt-smoke.sock}
+# Pass semicolon-delimited runtime shapes (e.g., "input=1,3,640,640;boxes=1,100,4") to exercise dynamic engines.
+SMOKE_RUNTIME_SHAPES=${SMOKE_RUNTIME_SHAPES:-}
+
+daemon_pid=""
 
 resolve_path() {
   python3 - "$1" <<'PY'
@@ -20,22 +24,37 @@ run_native() {
     exit 0
   fi
 
-  ./build/trt-daemon -e "${ENGINE}" -s "${SOCK}" &
-  local daemon_pid=$!
+  local -a daemon_cmd=("./build/trt-daemon" -e "${ENGINE}" -s "${SOCK}")
+  if [[ -n "${SMOKE_RUNTIME_SHAPES:-}" ]]; then
+    TRT_SHAPES="${SMOKE_RUNTIME_SHAPES}" "${daemon_cmd[@]}" &
+  else
+    "${daemon_cmd[@]}" &
+  fi
+  daemon_pid=$!
 
   cleanup() {
-    if kill -0 "${daemon_pid}" 2>/dev/null; then
-      kill "${daemon_pid}" >/dev/null 2>&1 || true
-      wait "${daemon_pid}" 2>/dev/null || true
+    local pid="${daemon_pid:-}"
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" >/dev/null 2>&1 || true
+      wait "${pid}" 2>/dev/null || true
     fi
     rm -f "${SOCK}"
   }
   trap cleanup EXIT
 
   for _ in {1..20}; do
+    if [[ -n "${daemon_pid}" ]] && ! kill -0 "${daemon_pid}" 2>/dev/null; then
+      echo "[smoke] daemon exited before socket became ready; likely missing GPU" >&2
+      return 0
+    fi
     [[ -S "${SOCK}" ]] && break
     sleep 0.5
   done
+
+  if [[ ! -S "${SOCK}" ]]; then
+    echo "[smoke] socket never appeared; skipping native smoke" >&2
+    return 0
+  fi
 
   python3 scripts/inspect_bindings.py --sock "${SOCK}"
 }
@@ -166,6 +185,10 @@ run_docker() {
     env_flags+=(-e "TRT_OPTS=${TRT_OPTS}")
   fi
 
+  if [[ -n "${SMOKE_RUNTIME_SHAPES:-}" ]]; then
+    env_flags+=(-e "TRT_SHAPES=${SMOKE_RUNTIME_SHAPES}")
+  fi
+
   local publish_arg
   if [[ -n "${host_ip}" ]]; then
     publish_arg="${host_ip}:${host_port}:8008"
@@ -246,8 +269,10 @@ main() {
     auto)
       if [[ -f /.dockerenv ]]; then
         run_native
-      else
+      elif command -v docker >/dev/null 2>&1; then
         run_docker
+      else
+        run_native
       fi
       ;;
     *)

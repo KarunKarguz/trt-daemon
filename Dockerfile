@@ -1,12 +1,29 @@
 # Builder stage compiles the daemon and runs smoke tests
-FROM nvcr.io/nvidia/tensorrt:22.12-py3 AS build
+# using TensorRT 21.06 as base image (which supports CUDA 11.3) on ubuntu 18.04
+FROM nvcr.io/nvidia/tensorrt:21.06-py3 AS build 
 
-ENV NVIDIA_DISABLE_REQUIRE=1
-ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+ENV NVIDIA_DISABLE_REQUIRE=1 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential cmake socat && \
+    apt-get install -y --no-install-recommends \
+        tzdata ca-certificates curl gnupg software-properties-common && \
+    ln -fs /usr/share/zoneinfo/$TZ /etc/localtime && \
+    dpkg-reconfigure -f noninteractive tzdata && \
+    apt-get install -y --no-install-recommends \
+        build-essential ninja-build socat && \
     rm -rf /var/lib/apt/lists/*
+
+ENV CMAKE_VERSION=3.27.9
+RUN curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" -o /tmp/cmake.tgz && \
+    tar -xzf /tmp/cmake.tgz -C /opt && \
+    mv "/opt/cmake-${CMAKE_VERSION}-linux-x86_64" /opt/cmake && \
+    rm /tmp/cmake.tgz
+
+ENV PATH="/opt/cmake/bin:${PATH}"
 
 WORKDIR /workspace
 COPY . /workspace
@@ -19,7 +36,7 @@ FROM build AS tester
 RUN scripts/smoke_test.sh
 
 # Runtime image keeps only binaries and models
-FROM nvcr.io/nvidia/tensorrt:22.12-py3 AS runtime
+FROM nvcr.io/nvidia/tensorrt:21.06-py3 AS runtime
 
 ENV NVIDIA_DISABLE_REQUIRE=1
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8

@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 /**
  * @brief RAII wrapper for CUDA streams used by the TensorRT context.
@@ -34,16 +35,30 @@ struct Binding {
   bool isInput{false};                     ///< True if the binding is an input tensor
 };
 
+struct RuntimeDeleter {
+  void operator()(nvinfer1::IRuntime* p) const noexcept { if (p) p->destroy(); }
+};
+
+struct EngineDeleter {
+  void operator()(nvinfer1::ICudaEngine* p) const noexcept { if (p) p->destroy(); }
+};
+
+struct ContextDeleter {
+  void operator()(nvinfer1::IExecutionContext* p) const noexcept { if (p) p->destroy(); }
+};
+
 /**
  * @brief Convenience wrapper that loads a serialized TensorRT engine and exposes synchronous inference.
  */
 class TRTServer {
 public:
+  using ShapeOverride = std::unordered_map<std::string, std::vector<int>>;
+
   /**
    * @param enginePath Filesystem path to a TensorRT `.plan` (serialized engine) file.
    * @throws std::runtime_error when the engine cannot be read or deserialized.
    */
-  explicit TRTServer(const std::string& enginePath);
+  explicit TRTServer(const std::string& enginePath, const ShapeOverride& runtimeShapes = {});
   ~TRTServer();
 
   /**
@@ -73,9 +88,9 @@ public:
 
 private:
   TRTLogger logger_;
-  std::unique_ptr<nvinfer1::IRuntime> runtime_;
-  std::unique_ptr<nvinfer1::ICudaEngine> engine_;
-  std::unique_ptr<nvinfer1::IExecutionContext> ctx_;
+  std::unique_ptr<nvinfer1::IRuntime, RuntimeDeleter> runtime_{nullptr};
+  std::unique_ptr<nvinfer1::ICudaEngine, EngineDeleter> engine_{nullptr};
+  std::unique_ptr<nvinfer1::IExecutionContext, ContextDeleter> ctx_{nullptr};
   CudaStream stream_;
 
   std::vector<Binding> inputs_;
@@ -86,10 +101,16 @@ private:
 
   /** Load and deserialize a serialized engine into runtime_/engine_/ctx_. */
   void loadEngineFromFile(const std::string& path);
+  /** Apply caller-provided runtime shapes before materialising bindings. */
+  void applyRuntimeShapes(const ShapeOverride& runtimeShapes);
+  /** Populate binding metadata after shapes are fixed. */
+  void collectBindings();
   /** Compute the flattened volume for a TensorRT dimension declaration. */
   static size_t vol(const nvinfer1::Dims& d);
   /** Map a TensorRT data type enum to its byte width. */
   static size_t eltSize(nvinfer1::DataType t);
+  /** Convert a vector<int> into a TensorRT Dims struct with validation. */
+  static nvinfer1::Dims toDims(const std::vector<int>& dimsVec, const std::string& name);
   /** Allocate device buffers that mirror the engine binding layout. */
   void allocDevice();
 };
