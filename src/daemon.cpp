@@ -12,16 +12,21 @@
 #include <string>
 #include <cmath>
 #include <chrono>
+#include <sstream>
+#include <vector>
 #include <errno.h>
+
+// Standalone daemon that accepts inference requests over a Unix domain socket.
 
 
 static std::atomic<bool> gStop{false};
 
 static void on_signal(int) { gStop = true; }
 
-// static const char* kSock = "/run/trt.sock";
-
-// send exactly n bytes (0 = ok, -1 = error)
+/**
+ * @brief Send exactly @p n bytes to @p fd, retrying short writes as needed.
+ * @return 0 on success, -1 when the peer disconnects or a fatal socket error occurs.
+ */
 static int write_all(int fd, const void* buf, size_t n) {
   const char* p = static_cast<const char*>(buf);
   size_t left = n;
@@ -37,7 +42,9 @@ static int write_all(int fd, const void* buf, size_t n) {
   return 0;
 }
 
-// read exactly n bytes (0 = ok, -1 = error/EOF)
+/**
+ * @brief Blocking read that fills @p buf with @p n bytes, aborting on EOF or error.
+ */
 static int read_full(int fd, void* buf, size_t n) {
   char* p = static_cast<char*>(buf);
   size_t left = n;
@@ -54,6 +61,9 @@ static int read_full(int fd, void* buf, size_t n) {
   return 0;
 }
 
+/**
+ * @brief Collects latency samples and prints a compact rolling summary.
+ */
 struct Stats {
   uint64_t count{0};
   double sum{0}, sumsq{0}, minv{1e9}, maxv{0};
@@ -81,11 +91,17 @@ struct Stats {
 };
 
 
+/**
+ * @brief Command-line knobs for choosing the engine file and socket path.
+ */
 struct Config {
   std::string engine = "model/resnet50_fp32.plan";
   std::string sock   = "/run/trt.sock";
 };
 
+/**
+ * @brief Parse CLI flags into a Config struct.
+ */
 static Config parse_args(int argc, char** argv) {
   Config cfg;
   for (int i=1; i<argc; ++i) {
@@ -100,6 +116,9 @@ static Config parse_args(int argc, char** argv) {
   return cfg;
 }
 
+/**
+ * @brief RAII helper for page-locked host buffers sized to TensorRT bindings.
+ */
 struct Pinned {
   void* p{nullptr}; size_t n{0};
   ~Pinned(){ if(p) cudaFreeHost(p); }
@@ -111,6 +130,26 @@ struct Pinned {
   }
 };
 
+/**
+ * @brief Render the daemon handshake that advertises binding metadata to clients.
+ */
+static std::string binding_header(const TRTServer& trt){
+  std::ostringstream oss;
+  oss << "TRTD 1\n";
+  auto dump = [&oss](char tag, const Binding& b){
+    oss << tag << ' ' << b.name << ' ' << b.bytes << ' ' << static_cast<int>(b.type) << ' ' << b.dims.nbDims;
+    for (int i=0;i<b.dims.nbDims;i++) oss << ' ' << b.dims.d[i];
+    oss << '\n';
+  };
+  for (const auto& b : trt.inputs()) dump('I', b);
+  for (const auto& b : trt.outputs()) dump('O', b);
+  oss << "END\n";
+  return oss.str();
+}
+
+/**
+ * @brief Create, bind, and listen on a Unix socket before handing it to epoll.
+ */
 static int make_server(const std::string& sockPath){
   ::unlink(sockPath.c_str());
   int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -123,7 +162,9 @@ static int make_server(const std::string& sockPath){
   return fd;
 }
 
-
+/**
+ * @brief Main event loop: accepts clients, streams tensors, and runs inference.
+ */
 int main(int argc, char** argv){
     // signals: ignore SIGPIPE, catch INT/TERM for shutdown
     signal(SIGPIPE, SIG_IGN);
@@ -137,9 +178,14 @@ int main(int argc, char** argv){
 
     TRTServer trt(cfg.engine);
 
-    Pinned hIn, hOut;
-    hIn.alloc(trt.input().bytes);
-    hOut.alloc(trt.output().bytes);
+    std::vector<Pinned> hInputs(trt.inputs().size());
+    std::vector<Pinned> hOutputs(trt.outputs().size());
+    for (size_t i=0;i<trt.inputs().size(); ++i) hInputs[i].alloc(trt.inputs()[i].bytes);
+    for (size_t i=0;i<trt.outputs().size(); ++i) hOutputs[i].alloc(trt.outputs()[i].bytes);
+    std::vector<void*> inViews(trt.inputs().size());
+    std::vector<void*> outViews(trt.outputs().size());
+
+    std::string header = binding_header(trt);
 
     int sfd = make_server(cfg.sock);
     int ep  = ::epoll_create1(0);
@@ -169,18 +215,35 @@ int main(int argc, char** argv){
                     continue;
                 }
                 if (cfd >= 0){
+                    if (write_all(cfd, header.data(), header.size()) != 0){
+                        ::close(cfd);
+                        continue;
+                    }
                     epoll_event cev{}; cev.events = EPOLLIN; cev.data.fd = cfd;
                     ::epoll_ctl(ep, EPOLL_CTL_ADD, cfd, &cev);
-                } else {
-                    perror("accept4"); 
                 }
             } else {
                 auto t0 = std::chrono::high_resolution_clock::now();
 
-                if (read_full(fd, hIn.p, hIn.n) != 0) { ::close(fd); continue; }
-                try { trt.infer(hIn.p, hOut.p); }
+                bool io_ok = true;
+                for (size_t i = 0; i < hInputs.size(); ++i) {
+                    if (read_full(fd, hInputs[i].p, hInputs[i].n) != 0) { io_ok = false; break; }
+                    inViews[i] = hInputs[i].p;
+                }
+                if (!io_ok) { ::close(fd); continue; }
+
+                for (size_t i = 0; i < hOutputs.size(); ++i) {
+                    outViews[i] = hOutputs[i].p;
+                }
+
+                try { trt.infer(inViews, outViews); }
                 catch (const std::exception& e) { std::cerr << "infer error: " << e.what() << "\n"; ::close(fd); continue; }
-                if (write_all(fd, hOut.p, hOut.n) != 0) { ::close(fd); continue; }
+
+                bool write_ok = true;
+                for (size_t i = 0; i < hOutputs.size(); ++i) {
+                    if (write_all(fd, hOutputs[i].p, hOutputs[i].n) != 0) { write_ok = false; break; }
+                }
+                if (!write_ok) { ::close(fd); continue; }
 
                 double ms = std::chrono::duration<double,std::milli>(
                 std::chrono::high_resolution_clock::now() - t0).count();

@@ -14,7 +14,11 @@ TRT_OPTS="${TRT_OPTS:-}"
 mkdir -p /run
 
 if [[ ! -f "${ENGINE_PATH}" ]]; then
-  if [[ -n "${ONNX_PATH}" && -f "${ONNX_PATH}" ]]; then
+  fallback_plan=$(find /opt/models -maxdepth 1 -name '*.plan' -print -quit || true)
+  if [[ -n "${fallback_plan}" ]]; then
+    echo "[entrypoint] ENGINE override: found ${fallback_plan}"
+    ENGINE_PATH="${fallback_plan}"
+  elif [[ -n "${ONNX_PATH}" && -f "${ONNX_PATH}" ]]; then
     echo "[entrypoint] ENGINE not found, building from ONNX..."
     # You can add shapes flags if your ONNX has dynamic dims; TRT often defaults to 1x3x224x224 for common CNNs.
     trtexec --onnx="${ONNX_PATH}" ${TRT_OPTS} --saveEngine="${ENGINE_PATH}"
@@ -33,4 +37,4 @@ if [[ "${EXPOSE_TCP}" == "1" ]]; then
 fi
 
 # Launch daemon in foreground (PID 1)
-exec /app/trtdaemon/build/trt-daemon -e "${ENGINE_PATH}" -s "${SOCKET_PATH}"
+exec /app/trtdaemon/bin/trt-daemon -e "${ENGINE_PATH}" -s "${SOCKET_PATH}"

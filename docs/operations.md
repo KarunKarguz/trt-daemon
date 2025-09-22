@@ -6,6 +6,7 @@ I keep these notes around for deploying the daemon on developer workstations and
 - Socket presence: `test -S /run/trt.sock`
 - TCP proxy (if enabled): `nc -z localhost 8008`
 - Engine sanity: run `./build/trt-client 20 5` and look for mean latency under target (e.g., < 20 ms for MobileNetv2 on 920MX)
+- Container workflow: `docker compose build test` executes the smoke handshake during the build; `docker compose up trt` reuses the artifacts and exposes the daemon on port 8008.
 
 ## Log locations
 - Docker: `docker logs <container>` shows daemon stdout plus the entrypoint banner

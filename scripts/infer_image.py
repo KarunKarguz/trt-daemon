@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse, socket, json
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
@@ -45,6 +45,7 @@ def send_all(sock, data: memoryview):
         n = sock.send(data)
         data = data[n:]
 
+
 def recv_all(sock, nbytes: int) -> bytes:
     buf = bytearray(nbytes)
     mv = memoryview(buf)
@@ -55,6 +56,45 @@ def recv_all(sock, nbytes: int) -> bytes:
         mv = mv[k:]
     return bytes(buf)
 
+
+def _readline(sock: socket.socket) -> str:
+    buf = bytearray()
+    while True:
+        chunk = sock.recv(1)
+        if not chunk:
+            raise RuntimeError("socket closed during handshake")
+        if chunk == b"\n":
+            return buf.decode()
+        buf += chunk
+
+
+def read_handshake(sock: socket.socket) -> Tuple[List[dict], List[dict]]:
+    header = _readline(sock)
+    if header.strip() != "TRTD 1":
+        raise RuntimeError("unexpected protocol preamble")
+    inputs, outputs = [], []
+    while True:
+        line = _readline(sock)
+        if line == "END":
+            break
+        parts = line.strip().split()
+        if not parts:
+            continue
+        kind = parts[0]
+        name = parts[1]
+        bytes_len = int(parts[2])
+        dtype = int(parts[3])
+        ndims = int(parts[4])
+        dims = list(map(int, parts[5:5 + ndims]))
+        entry = {"name": name, "bytes": bytes_len, "dtype": dtype, "dims": dims}
+        if kind == "I":
+            inputs.append(entry)
+        elif kind == "O":
+            outputs.append(entry)
+    if not inputs or not outputs:
+        raise RuntimeError("protocol header missing bindings")
+    return inputs, outputs
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sock", default=DEF_SOCK, help="Unix socket path (daemon)")
@@ -64,17 +104,21 @@ def main():
     args = ap.parse_args()
 
     x = preprocess(args.image, size=args.size)        # (1,3,224,224) float32
-    in_bytes = x.tobytes(order="C")
-    out_elems = 1000
-    out_bytes = out_elems * 4
-
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(args.sock)
-    send_all(s, memoryview(in_bytes))
-    out_raw = recv_all(s, out_bytes)
+    inputs, outputs = read_handshake(s)
+
+    if len(inputs) != 1:
+        raise RuntimeError(f"expected single input binding, got {len(inputs)}")
+    if inputs[0]["bytes"] != x.nbytes:
+        raise RuntimeError("binding byte-size mismatch; adjust preprocessing or use --size")
+
+    send_all(s, memoryview(x.tobytes(order="C")))
+
+    out_chunks = [recv_all(s, out_info["bytes"]) for out_info in outputs]
     s.close()
 
-    logits = np.frombuffer(out_raw, dtype=np.float32)
+    logits = np.frombuffer(out_chunks[0], dtype=np.float32)
     probs = softmax(logits[None, :])[0]
     top5 = np.argsort(probs)[-5:][::-1]
 

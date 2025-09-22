@@ -1,8 +1,20 @@
 services:
-  trt:
-    image: trt-daemon:local
-    build: .
+  test:
+    build:
+      context: .
+      target: tester
+    image: trt-daemon:test
     runtime: nvidia
+    command: ["/bin/true"]
+
+  trt:
+    build:
+      context: .
+      target: runtime
+    image: trt-daemon:runtime
+    runtime: nvidia
+    depends_on:
+      - test
     environment:
       NVIDIA_DISABLE_REQUIRE: "1"
       ENGINE_PATH: /opt/models/mobilenetv2_fp32.plan
@@ -10,8 +22,3 @@ services:
       TCP_PORT: "8008"
     ports:
       - "8008:8008"
-    healthcheck:
-      test: ["CMD", "test", "-S", "/run/trt.sock"]
-      interval: 20s
-      timeout: 3s
-      retries: 5
