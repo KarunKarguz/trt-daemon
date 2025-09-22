@@ -6,6 +6,7 @@ This workspace captures a small TensorRT inference daemon I bring up inside NVID
 - Keep a reproducible sandbox for Maxwell-class GPUs (GeForce 920MX) that must stick to TensorRT 8.5.x + CUDA 11.8
 - Validate serialized engines quickly without pulling in Triton or larger microservice frameworks
 - Provide a thin reference for both local socket clients and simple TCP proxies
+- Encode model binding metadata in a tiny handshake so clients can adapt to different engines (multi-input/output ready)
 
 Everything runs inside the TensorRT 22.12 container, launched the same way I used during development:
 
@@ -28,6 +29,10 @@ The remainder of this README focuses on the daemon module because that is what w
 ---
 
 # `workspace/trtdaemon`
+
+## Documentation
+
+Inline Doxygen-style comments live in `include/trt_server.hpp` and the daemon/client entrypoints to explain the socket protocol, binding metadata, and lifecycle expectations. Run `doxygen` with the provided headers to generate reference pages, or browse the comments directly when extending the service.
 
 ## Build system at a glance
 
@@ -66,7 +71,7 @@ cd workspace/trtdaemon
    cd /workspace/workspace/trtdaemon
    ./build/trt-daemon -e models/mobilenetv2_fp32.plan -s /run/trt.sock
    ```
-3. By default the daemon listens on `/run/trt.sock`. It allocates pinned host buffers sized to the engine bindings and prints latency stats every 100 requests.
+3. By default the daemon listens on `/run/trt.sock`. It emits a text handshake (`TRTD 1` header) listing each binding with byte length, dtype, and dimensions before reading tensors. Pinned host buffers are sized to these bindings and latency stats print every 100 requests. If `/opt/models` already contains a `.plan`, the entrypoint auto-selects it; otherwise provide `ENGINE_PATH` or `ONNX_PATH`.
 
 Stop it with `Ctrl+C`; the socket file is removed on shutdown.
 
@@ -75,18 +80,25 @@ Stop it with `Ctrl+C`; the socket file is removed on shutdown.
 ### Local Unix socket
 ```bash
 cd workspace/trtdaemon
-./build/trt-client 500 50   # 500 iterations, 50 warmup
+./build/trt-client 500 50   # 500 iterations, 50 warmup (handshake parsed automatically)
 ```
 
 ### Python helpers
 - `scripts/infer_image.py` – sends a preprocessed image over the Unix socket and prints Top-5 predictions
 - `scripts/infer_image_tcp.py` – same flow but talks to the TCP proxy (see next section)
+- `scripts/inspect_bindings.py` – dumps the negotiated bindings from the daemon handshake for troubleshooting
+- `scripts/smoke_test.sh` – internal smoke runner invoked during Docker builds
 
 Example:
 ```bash
 python3 scripts/infer_image.py --image images/tabby_tiger_cat.jpg \
   --labels images/imagenet_classes.txt
 ```
+
+### Docker Compose workflow
+- `docker compose build test` compiles the daemon inside the TensorRT base image and runs the smoke handshake (skips automatically if the bundled model is absent).
+- `docker compose up trt` reuses the cached build artifacts, starts the daemon, and exposes TCP on port 8008.
+- Both services assume a GPU-enabled host (the smoke test loads the bundled Mobilenet plan).
 
 ### Optional TCP proxy
 If `EXPOSE_TCP=1` is set (the default in `entrypoint.sh`), the Docker build bundles `socat` and exposes port `8008`. External clients can then connect over TCP while the daemon still reads from `/run/trt.sock`.
@@ -105,7 +117,6 @@ python3 scripts/infer_image_tcp.py --host 127.0.0.1 --port 8008 \
 
 ## Packaging choices
 
-- `Dockerfile` builds on `nvcr.io/nvidia/tensorrt:22.12-py3`, copies the freshly compiled binaries and sample models, and wires up `entrypoint.sh` for runtime configuration.
-- `docker-compose.yml` drives the same image in a simple single-service stack and publishes port `8008`.
+- `Dockerfile` builds on `nvcr.io/nvidia/tensorrt:22.12-py3`, compiles the daemon, runs the smoke handshake, and wires up `entrypoint.sh` for runtime configuration.
+- `docker-compose.yml` separates the smoke stage (`docker compose build test`) from the runtime deployment (`docker compose up trt`).
 - `deploy/trt-daemon.service` + `install.sh` provide a bare systemd deployment path for non-container hosts.
-

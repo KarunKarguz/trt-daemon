@@ -31,12 +31,12 @@ The daemon sits between TensorRT's C++ runtime and simple client programs. Every
 
 ## Protocol
 
-1. Client connects and sends `N` bytes where `N` is the size of the first binding (float32 input tensor).
-2. Daemon copies host memory into device memory, enqueues inference, and waits for completion.
-3. Daemon copies the output binding back to host memory and writes it to the socket.
+1. Client connects and receives an ASCII preamble (`TRTD 1`) that lists each input (`I ...`) and output (`O ...`) binding: name, byte length, TensorRT datatype enum value, and dimensions.
+2. Client streams every input tensor sequentially using the advertised byte counts.
+3. Daemon copies host memory into device memory, enqueues inference, waits for completion, then copies each output back and writes them in the same order.
 4. Connection stays open for subsequent requests until the client closes it.
 
-There is no header, framing, or metadata. The contract is implicit: both sides agree on the binding shapes beforehand (e.g., 1×3×224×224 input, 1000 float outputs). For public releases, document the target model alongside the serialization recipe to avoid confusion.
+With the explicit metadata the protocol now supports multiple inputs/outputs safely. Engines must still resolve to concrete binding sizes before startup—dynamic shapes are not negotiated on the wire.
 
 ## Extending safely
 

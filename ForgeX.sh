@@ -1,5 +1,3 @@
 rm -rf build
-mkdir -p build && cd build
-cmake -DCUDAToolkit_ROOT=/usr/local/cuda ..
-make -j$(nproc)
-cd .. 
+cmake -B build -S . -DCUDAToolkit_ROOT=/usr/local/cuda
+cmake --build build -j$(nproc)
